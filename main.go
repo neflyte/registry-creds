@@ -28,6 +28,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io/ioutil"
 	"os"
 	"strconv"
 	"strings"
@@ -39,8 +40,8 @@ import (
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/ecr"
 	"github.com/cenkalti/backoff"
+	"github.com/neflyte/registry-creds/k8sutil" // FIXME: revert this before merge
 	flag "github.com/spf13/pflag"
-	"github.com/upmc-enterprises/registry-creds/k8sutil"
 	"golang.org/x/net/context"
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
@@ -327,29 +328,42 @@ type SecretGenerator struct {
 func getSecretGenerators(c *controller) []SecretGenerator {
 	secretGenerators := make([]SecretGenerator, 0)
 
-	secretGenerators = append(secretGenerators, SecretGenerator{
-		TokenGenFxn: c.getGCRAuthorizationKey,
-		IsJSONCfg:   false,
-		SecretName:  *argGCRSecretName,
-	})
+	// If application_default_credentials.json does not contain "changeme" then add a GCR secret generator
+	gcrCreds, err := ioutil.ReadFile("/root/.config/gcloud/application_default_credentials.json")
+	if err == nil && string(gcrCreds) != "changeme" {
+		secretGenerators = append(secretGenerators, SecretGenerator{
+			TokenGenFxn: c.getGCRAuthorizationKey,
+			IsJSONCfg:   false,
+			SecretName:  *argGCRSecretName,
+		})
+	}
 
-	secretGenerators = append(secretGenerators, SecretGenerator{
-		TokenGenFxn: c.getECRAuthorizationKey,
-		IsJSONCfg:   true,
-		SecretName:  *argAWSSecretName,
-	})
+	// If there are any defined AWD Account IDs then add a ECR secret generator
+	if len(awsAccountIDs) > 0 {
+		secretGenerators = append(secretGenerators, SecretGenerator{
+			TokenGenFxn: c.getECRAuthorizationKey,
+			IsJSONCfg:   true,
+			SecretName:  *argAWSSecretName,
+		})
+	}
 
-	secretGenerators = append(secretGenerators, SecretGenerator{
-		TokenGenFxn: c.getDPRToken,
-		IsJSONCfg:   true,
-		SecretName:  *argDPRSecretName,
-	})
+	// If a Docker Private Registry server is defined then add a DPR secret generator
+	if *argDPRServer != "" {
+		secretGenerators = append(secretGenerators, SecretGenerator{
+			TokenGenFxn: c.getDPRToken,
+			IsJSONCfg:   true,
+			SecretName:  *argDPRSecretName,
+		})
+	}
 
-	secretGenerators = append(secretGenerators, SecretGenerator{
-		TokenGenFxn: c.getACRToken,
-		IsJSONCfg:   true,
-		SecretName:  *argACRSecretName,
-	})
+	// If an Azure Container Registry URL is defined then add a ACR secret generator
+	if *argACRURL != "" {
+		secretGenerators = append(secretGenerators, SecretGenerator{
+			TokenGenFxn: c.getACRToken,
+			IsJSONCfg:   true,
+			SecretName:  *argACRSecretName,
+		})
+	}
 
 	return secretGenerators
 }
