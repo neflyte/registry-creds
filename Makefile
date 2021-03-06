@@ -27,7 +27,7 @@ all: container
 
 .PHONY: build
 build: main.go
-	GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -a -installsuffix cgo -o $(BIN) --ldflags '-w' $<
+	GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -a -installsuffix nocgo -o $(BIN) -ldflags '-s -w' $<
 
 .PHONY: container
 container: build
