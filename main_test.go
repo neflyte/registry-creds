@@ -7,13 +7,14 @@ import (
 	"io/ioutil"
 	"log"
 	"os"
+	"path"
 	"testing"
 
 	"github.com/Sirupsen/logrus"
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/service/ecr"
+	"github.com/neflyte/registry-creds/k8sutil" // FIXME: revert this before merge
 	"github.com/stretchr/testify/assert"
-	"github.com/upmc-enterprises/registry-creds/k8sutil"
 	"golang.org/x/net/context"
 	"golang.org/x/oauth2"
 	coreType "k8s.io/client-go/kubernetes/typed/core/v1"
@@ -23,25 +24,25 @@ import (
 	"k8s.io/client-go/pkg/watch"
 )
 
-func init() {
-	log.SetOutput(ioutil.Discard)
-	logrus.SetOutput(ioutil.Discard)
-}
+var (
+	gcrConfigCleanupNeeded = false // gcrConfigCleanupNeeded is a flag that indicates a temporary GCR config file was created for testing and should be removed
+	gcrConfigFilename      string  // gcrConfigFilename is the path and filename of a temporary GCR config file created for testing
+)
 
-func disableRetries() {
+/*func disableRetries() {
 	RetryCfg = RetryConfig{
 		Type:                "simple",
 		NumberOfRetries:     0,
-		RetryDelayInSeconds: 1,
+		RetryDelayInSeconds: 0.25,
 	}
 	SetupRetryTimer()
-}
+}*/
 
 func enableShortRetries() {
 	RetryCfg = RetryConfig{
 		Type:                "simple",
 		NumberOfRetries:     2,
-		RetryDelayInSeconds: 1,
+		RetryDelayInSeconds: 0.25,
 	}
 	SetupRetryTimer()
 }
@@ -379,8 +380,8 @@ func newFakeFailingACRClient() *fakeFailingACRClient {
 
 func process(t *testing.T, c *controller) {
 	namespaces, _ := c.k8sutil.Kclient.Namespaces().List(v1.ListOptions{})
-	for _, ns := range namespaces.Items {
-		err := handler(c, &ns)
+	for idx := range namespaces.Items {
+		err := handler(c, &namespaces.Items[idx])
 		assert.Nil(t, err)
 	}
 }
@@ -403,6 +404,49 @@ func newFakeFailingController() *controller {
 	acrClient := newFakeFailingACRClient()
 	c := controller{util, ecrClient, gcrClient, dprClient, acrClient}
 	return &c
+}
+
+func mustEnsureGCRConfig(t *testing.T) {
+	userHomeDir, err := os.UserHomeDir()
+	if err != nil {
+		userHomeDir = "."
+	}
+	gcrCredsPath := path.Join(userHomeDir, ".config", "gcloud")
+	gcrCredsFile := path.Join(gcrCredsPath, gcrCredsDefaultFilename)
+	_, err = os.Stat(gcrCredsFile)
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatalf("error stat'ing GCR creds file %s: %s", gcrCredsFile, err.Error())
+	}
+	if os.IsNotExist(err) {
+		// Need to create a temporary GCR credentials file
+		err = os.MkdirAll(gcrCredsPath, 0750)
+		if err != nil {
+			t.Fatalf("error creating directories for temporary GCR creds file: %s", err.Error())
+		}
+		err = ioutil.WriteFile(gcrCredsFile, []byte(""), 0600)
+		if err != nil {
+			t.Fatalf("error creating temporary GCR creds file %s: %s", gcrCredsFile, err.Error())
+		}
+		// Clean up the temporary GCR credentials file when we're done testing
+		gcrConfigCleanupNeeded = true
+		gcrConfigFilename = gcrCredsFile
+	}
+}
+
+func mustCleanupGCRConfig(t *testing.T) {
+	if gcrConfigCleanupNeeded {
+		err := os.Remove(gcrConfigFilename)
+		if err != nil {
+			t.Fatalf("error cleaning up temporary GCR creds file %s: %s", gcrConfigFilename, err.Error())
+		}
+	}
+}
+
+func TestMain(m *testing.M) {
+	// log.SetOutput(ioutil.Discard)
+	// logrus.SetOutput(ioutil.Discard)
+	logrus.SetLevel(logrus.DebugLevel)
+	os.Exit(m.Run())
 }
 
 func TestGetECRAuthorizationKey(t *testing.T) {
@@ -448,6 +492,7 @@ func assertAllExpectedSecrets(t *testing.T, c *controller) {
 	for _, ns := range []string{"namespace1", "namespace2"} {
 		secret, err := c.k8sutil.GetSecret(ns, *argGCRSecretName)
 		assert.Nil(t, err)
+		assert.NotNil(t, secret)
 		assert.Equal(t, *argGCRSecretName, secret.Name)
 		assert.Equal(t, map[string][]byte{
 			".dockercfg": []byte(fmt.Sprintf(dockerCfgTemplate, "fakeEndpoint", "fakeToken")),
@@ -501,7 +546,11 @@ func assertExpectedSecretNumber(t *testing.T, c *controller, n int) {
 }
 
 func TestProcessOnce(t *testing.T) {
+	mustEnsureGCRConfig(t)
+	defer mustCleanupGCRConfig(t)
 	*argGCRURL = "fakeEndpoint"
+	*argACRURL = "fakeACREndpoint"
+	*argDPRServer = "fake.host"
 	awsAccountIDs = []string{""}
 	c := newFakeController()
 
@@ -511,7 +560,11 @@ func TestProcessOnce(t *testing.T) {
 }
 
 func TestProcessTwice(t *testing.T) {
+	mustEnsureGCRConfig(t)
+	defer mustCleanupGCRConfig(t)
 	*argGCRURL = "fakeEndpoint"
+	*argACRURL = "fakeACREndpoint"
+	*argDPRServer = "fake.host"
 	c := newFakeController()
 
 	process(t, c)
@@ -525,7 +578,11 @@ func TestProcessTwice(t *testing.T) {
 }
 
 func TestProcessWithExistingSecrets(t *testing.T) {
+	mustEnsureGCRConfig(t)
+	defer mustCleanupGCRConfig(t)
 	*argGCRURL = "fakeEndpoint"
+	*argACRURL = "fakeACREndpoint"
+	*argDPRServer = "fake.host"
 	c := newFakeController()
 
 	secretGCR := &v1.Secret{
@@ -598,6 +655,12 @@ func TestProcessWithExistingSecrets(t *testing.T) {
 // }
 
 func TestProcessWithExistingImagePullSecrets(t *testing.T) {
+	mustEnsureGCRConfig(t)
+	defer mustCleanupGCRConfig(t)
+	*argGCRURL = "fakeEndpoint"
+	*argACRURL = "fakeACREndpoint"
+	*argDPRServer = "fake.host"
+	awsAccountIDs = []string{""}
 	c := newFakeController()
 
 	for _, ns := range []string{"namespace1", "namespace2"} {
@@ -605,6 +668,7 @@ func TestProcessWithExistingImagePullSecrets(t *testing.T) {
 		assert.Nil(t, err)
 		serviceAccount.ImagePullSecrets = append(serviceAccount.ImagePullSecrets, v1.LocalObjectReference{Name: "someOtherSecret"})
 		err = c.k8sutil.UpdateServiceAccount(ns, serviceAccount)
+		assert.Nil(t, err)
 	}
 
 	process(t, c)

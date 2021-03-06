@@ -30,6 +30,7 @@ import (
 	"fmt"
 	"io/ioutil"
 	"os"
+	"path"
 	"strconv"
 	"strings"
 	"time"
@@ -66,6 +67,8 @@ const (
 	defaultTokenGenRetries           = 3
 	defaultTokenGenRetryDelay        = 5 // in seconds
 	defaultTokenGenRetryType         = retryTypeSimple
+
+	gcrCredsDefaultFilename = "application_default_credentials.json" // gcrCredsDefaultFilename is the default file name of the GCR credentials file
 )
 
 var (
@@ -124,7 +127,7 @@ type controller struct {
 type RetryConfig struct {
 	Type                string
 	NumberOfRetries     int
-	RetryDelayInSeconds int
+	RetryDelayInSeconds float32
 }
 
 // Docker Private Registry interface
@@ -326,10 +329,20 @@ type SecretGenerator struct {
 }
 
 func getSecretGenerators(c *controller) []SecretGenerator {
+	var err error
+	var userHomeDir string
+
+	log := logrus.WithField("function", "processNamespace")
 	secretGenerators := make([]SecretGenerator, 0)
 
 	// If application_default_credentials.json does not contain "changeme" then add a GCR secret generator
-	gcrCreds, err := ioutil.ReadFile("/root/.config/gcloud/application_default_credentials.json")
+	userHomeDir, err = os.UserHomeDir()
+	if err != nil {
+		userHomeDir = "."
+	}
+	gcrCredsFile := path.Join(userHomeDir, ".config", "gcloud", gcrCredsDefaultFilename)
+	log.Debugf("gcrCredsFile=%s", gcrCredsFile)
+	gcrCreds, err := ioutil.ReadFile(gcrCredsFile)
 	if err == nil && string(gcrCreds) != "changeme" {
 		secretGenerators = append(secretGenerators, SecretGenerator{
 			TokenGenFxn: c.getGCRAuthorizationKey,
@@ -521,7 +534,7 @@ func validateParams() {
 	RetryCfg = RetryConfig{
 		Type:                *argTokenGenFxnRetryType,
 		NumberOfRetries:     *argTokenGenFxnRetries,
-		RetryDelayInSeconds: *argTokenGenFxnRetryDelay,
+		RetryDelayInSeconds: float32(*argTokenGenFxnRetryDelay),
 	}
 	// ensure command line values are valid
 	if RetryCfg.Type != retryTypeSimple && RetryCfg.Type != retryTypeExponential {
@@ -570,7 +583,7 @@ func validateParams() {
 				logrus.Errorf("Cannot use a negative value for environment variable %s! Defaulting to %d", tokenGenRetryDelayKey, defaultTokenGenRetryDelay)
 				RetryCfg.RetryDelayInSeconds = defaultTokenGenRetryDelay
 			} else {
-				RetryCfg.RetryDelayInSeconds = tokenRetryDelayInt
+				RetryCfg.RetryDelayInSeconds = float32(tokenRetryDelayInt)
 			}
 		}
 	}
